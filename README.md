@@ -1,4 +1,4 @@
-# Step Buddy 3.0 — Classroom support for students with ADHD
+# PeaceMakers — Classroom support for students with ADHD
 
 Step Buddy breaks classroom activities into small, clear steps. Students use a micro:bit to mark a step complete, ask for help, or take a break. Teachers respond through a local dashboard on a phone or computer. The student uses physical task cards and buttons, so the activity can run without a student tablet.
 
