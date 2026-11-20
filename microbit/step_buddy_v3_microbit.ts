@@ -1,15 +1,17 @@
 // =============================================================================
 // Step Buddy 3.0 | Physical student device (micro:bit + Elecfreaks WuKong)
-// MakeCode micro:bit -> JavaScript. No third-party extensions needed.
+// MakeCode micro:bit -> JavaScript (Static TypeScript). No third-party extensions needed.
 //
 // Designed as a classroom support tool, NOT a detector of attention/ADHD.
 // Student: A = finished; B = help / press B again to cancel; A+B = break.
 // During a movement-break offer: A = start, B = later.
 // During a break: A = return early; A+B also ends the break.
 //
-// Hardware (existing project wiring):
-// P14 TX -> ESP8266 D5 RX | P15 RX <- ESP8266 D6 TX | GND common
-// WuKong onboard buzzer -> P0 (turn its physical switch ON) | S0 -> pointer servo
+// Hardware wiring (updated):
+// ESP8266 D5 (RX) <- WuKong 14S (TX) | ESP8266 D6 (TX) -> WuKong 15S (RX) | GND common
+// External Buzzer -> WuKong 13S / 13V / 13G (P13)
+// Sonar:bit       -> WuKong 8S / 8V / 8G (P8, seat presence / AWAY state)
+// Pointer Servo   -> WuKong S0S / S0V / S0G (S0, I2C 0x10)
 // =============================================================================
 
 const POINTER_START = 0
@@ -19,12 +21,19 @@ const HINT_MS = 5000
 const BRIGHT_NORMAL = 155
 const BRIGHT_LOW = 35
 const SOUND_ON = true
-// All sound uses the WuKong onboard P0 buzzer.
+// All sound uses the external buzzer connected to WuKong 13S (P13).
 
 const LOW_SENSORY_DEFAULT = true
 const TIMER_DEFAULT = false // optional, some learners find a countdown stressful
 
-let tplNames = ["Homework", "Class", "Reading"]
+// Sonar:bit seat-presence settings (WuKong 8S / P8).
+const SONAR_ENABLED = true
+const SONAR_SAMPLE_MS = 500
+const AWAY_DIST_CM = 40
+const AWAY_CONFIRM_MS = 3000
+const RETURN_CONFIRM_MS = 1500
+
+let tplNames: string[] = ["Homework", "Class", "Reading"]
 let tplSteps: string[][] = [
     ["Read one question", "Find key words", "Try first answer", "Do next answer", "Check one answer", "Pack up"],
     ["Hear today's goal", "Watch one example", "Try one item", "Do two more", "Share an answer", "Tidy up"],
@@ -56,6 +65,11 @@ let step = 0
 let stepBudgetSec = 180
 let finished = false
 let paused = false
+let away = false
+let sonarSeenValid = false
+let awaySince = 0
+let backSince = 0
+let lastSonarAt = 0
 let waitingTeacher = false
 let helpActive = false
 let helpAcknowledged = false
@@ -109,6 +123,47 @@ function movePointer() {
     let s = Math.min(step, nSteps() - 1)
     setServo(POINTER_START + s * POINTER_STEP)
 }
+function readSonarCm(): number {
+    pins.digitalWritePin(DigitalPin.P8, 0)
+    control.waitMicros(2)
+    pins.digitalWritePin(DigitalPin.P8, 1)
+    control.waitMicros(10)
+    pins.digitalWritePin(DigitalPin.P8, 0)
+    let duration = pins.pulseIn(DigitalPin.P8, PulseValue.High, 25000)
+    if (duration <= 0) return -1
+    return Math.idiv(duration * 34, 2000)
+}
+function updateSeatPresence(now: number) {
+    if (!SONAR_ENABLED) return
+    if (paused || finished || resting || moving) {
+        awaySince = 0
+        backSince = 0
+        return
+    }
+    let dist = readSonarCm()
+    if (dist > 0 && dist <= AWAY_DIST_CM) {
+        sonarSeenValid = true
+        awaySince = 0
+        if (away) {
+            if (backSince == 0) backSince = now
+            else if (now - backSince >= RETURN_CONFIRM_MS) {
+                away = false
+                backSince = 0
+                sendEvent("away_end", "" + dist)
+            }
+        }
+    } else if (sonarSeenValid) {
+        backSince = 0
+        if (!away) {
+            if (awaySince == 0) awaySince = now
+            else if (now - awaySince >= AWAY_CONFIRM_MS) {
+                away = true
+                awaySince = 0
+                sendEvent("away_start", dist > 0 ? "" + dist : "out_of_range")
+            }
+        }
+    }
+}
 function defaultStepBudget() {
     stepBudgetSec = tplMins[tpl][Math.min(step, nSteps() - 1)] * 60
 }
@@ -116,6 +171,9 @@ function newSession() {
     step = 0
     finished = false
     paused = false
+    away = false
+    awaySince = 0
+    backSince = 0
     waitingTeacher = false
     helpActive = false
     helpAcknowledged = false
@@ -150,6 +208,9 @@ function newSession() {
 function completeStep(byTeacher: boolean) {
     if (paused || finished || resting || moving) return
     let now = input.runningTime()
+    away = false
+    awaySince = 0
+    backSince = 0
     waitingTeacher = false
     helpActive = false
     helpAcknowledged = false
@@ -224,6 +285,9 @@ function resolveHelp() {
 function startRest(who: string) {
     if (paused || finished || resting) return
     if (moving) endMove("rest")
+    away = false
+    awaySince = 0
+    backSince = 0
     moveOffer = false
     moveOfferUntil = 0
     resting = true
@@ -240,7 +304,7 @@ function endRest(why: string) {
     sendEvent("rest_end", why)
 }
 function offerMove(why: string) {
-    if (moveIntervalSec == 0 || moveOffer || moving || resting || paused || finished) return
+    if (moveIntervalSec == 0 || moveOffer || moving || resting || paused || finished || away) return
     moveOffer = true
     moveOfferUntil = input.runningTime() + 20000 // offer expires gently if ignored
     sendEvent("move_offer", why)
@@ -248,6 +312,9 @@ function offerMove(why: string) {
 }
 function startMove(who: string) {
     if (paused || finished || resting || moving) return
+    away = false
+    awaySince = 0
+    backSince = 0
     moving = true
     moveOffer = false
     moveOfferUntil = 0
@@ -373,6 +440,12 @@ const pauseImg = images.createImage(`
 . # . # .
 . # . # .
 . # . # .`)
+const awayImg = images.createImage(`
+. . . . .
+. # # # .
+. # . # .
+. # # # .
+. . . . .`)
 const waitImg = images.createImage(`
 # # # # #
 . # . # .
@@ -397,6 +470,7 @@ function currentView(now: number): string {
     if (now < rewardUntil) return "reward"
     if (now < tokenBarUntil) return "tokens" + (tokens % TOKENS_PER_REWARD)
     if (finished) return "finished"
+    if (away) return "away"
     if (moveOffer) return "offer"
     if (waitingTeacher) return "wait"
     // Calm alternation: the help symbol is visible even when the teacher's
@@ -412,6 +486,7 @@ function draw(view: string) {
     led.setBrightness(lowSensory ? BRIGHT_LOW : BRIGHT_NORMAL)
     basic.clearScreen()
     if (view == "pause") pauseImg.plotImage(0)
+    else if (view == "away") awayImg.plotImage(0)
     else if (view.indexOf("rest") == 0 && view != "restover") {
         let n = parseInt(view.substr(4))
         for (let i = 0; i < n; i++) led.plot(i % 5, Math.idiv(i, 5))
@@ -444,6 +519,7 @@ function sendStatus() {
     else if (paused) state = "PAUSE"
     else if (resting) state = restLeft > 0 ? "REST" : "RESTOVER"
     else if (moving) state = "MOVE"
+    else if (away) state = "AWAY"
     else if (moveOffer) state = "OFFER"
     else if (waitingTeacher) state = "WAIT"
     else if (timerView && stepMs >= budgetMs()) state = "TIME"
@@ -461,8 +537,8 @@ function sendStatus() {
 
 serial.redirect(SerialPin.P14, SerialPin.P15, BaudRate.BaudRate9600)
 serial.setRxBufferSize(96)
-pins.digitalWritePin(DigitalPin.P0, 0)
-pins.analogSetPitchPin(AnalogPin.P0)
+pins.digitalWritePin(DigitalPin.P13, 0)
+pins.analogSetPitchPin(AnalogPin.P13)
 music.setBuiltInSpeakerEnabled(false)
 serial.onDataReceived(serial.delimiters(Delimiters.NewLine), function () {
     let line = serial.readUntil(serial.delimiters(Delimiters.NewLine))
@@ -472,6 +548,7 @@ serial.onDataReceived(serial.delimiters(Delimiters.NewLine), function () {
 input.onButtonPressed(Button.A, function () { pressA = true })
 input.onButtonPressed(Button.B, function () { pressB = true })
 input.onButtonPressed(Button.AB, function () { pressAB = true })
+basic.pause(300)
 newSession()
 movePointer()
 sendEvent("power_on", "")
@@ -483,8 +560,13 @@ basic.forever(function () {
     let dt = Math.max(0, Math.min(2000, now - last))
     last = now
 
+    if (now - lastSonarAt >= SONAR_SAMPLE_MS) {
+        updateSeatPresence(now)
+        lastSonarAt = now
+    }
+
     // Work clock is NOT a measured focus score. It excludes rest, movement,
-    // and paused or finished sessions.
+    // away periods, and paused or finished sessions.
     if (!paused && !finished) {
         if (resting) {
             if (restLeft > 0) {
@@ -494,9 +576,9 @@ basic.forever(function () {
         } else if (moving) {
             moveLeft -= dt
             if (moveLeft <= 0) { endMove("time"); beep(Note.C5) }
-        } else if (!waitingTeacher && !helpActive) {
-            // Time waiting for teacher support or verification is NOT counted
-            // as work; a help request cannot cause an overtime judgement.
+        } else if (!waitingTeacher && !helpActive && !away) {
+            // Time waiting for teacher support or away from the seat is NOT
+            // counted as work; a help request cannot cause an overtime judgement.
             workMs += dt
             stepMs += dt
             if (moveIntervalSec > 0) {
@@ -507,6 +589,16 @@ basic.forever(function () {
                 overtimeSent = true
                 sendEvent("time_guide_reached", "")
             }
+        }
+    }
+
+    // Any physical button press confirms the student is back at the device.
+    if (pressAB || pressA || pressB) {
+        if (away) {
+            away = false
+            awaySince = 0
+            backSince = 0
+            sendEvent("away_end", "button")
         }
     }
 
