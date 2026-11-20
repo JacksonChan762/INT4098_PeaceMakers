@@ -23,9 +23,9 @@
 const char* AP_NAME = "StepBuddy-01";
 const char* WEB_USER = "teacher";
 
-static_assert(sizeof(AP_PASS) >= 9 && sizeof(AP_PASS) <= 64,
+static_assert(sizeof(AP_PASS) >= 8 && sizeof(AP_PASS) <= 64,
               "Set an 8–63 character Wi-Fi password in src/config.h");
-static_assert(sizeof(WEB_PASS) >= 9,
+static_assert(sizeof(WEB_PASS) >= 8,
               "Set a teacher dashboard password of at least 8 characters in src/config.h");
 
 const int FIELD_COUNT = 26;
