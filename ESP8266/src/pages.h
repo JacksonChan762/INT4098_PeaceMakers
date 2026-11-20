@@ -18,6 +18,12 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 details{border-top:1px solid var(--line);margin-top:14px;padding-top:13px}summary{cursor:pointer;font-weight:750}details>p{color:var(--muted);font-size:14px}
 .stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.stat{border:1px solid var(--line);border-radius:12px;padding:11px}.stat b{font-size:24px;display:block}
 .small{font-size:13px;color:var(--muted)}#toast:empty{display:none}#toast{position:sticky;bottom:8px;background:white;padding:10px;border:1px solid var(--line);border-radius:10px;min-height:20px;color:var(--navy);font-size:14px}footer{color:var(--muted);font-size:13px;margin-top:22px}
+.modal-backdrop{position:fixed;inset:0;background:rgba(23,40,60,.55);display:none;align-items:center;justify-content:center;padding:16px;z-index:999}
+.modal-backdrop.show{display:flex}
+.modal{background:#fff;border:2px solid #d97706;border-radius:18px;max-width:420px;width:100%;padding:22px;box-shadow:0 12px 32px rgba(0,0,0,.22)}
+.modal h3{margin:0 0 8px;font-size:21px;color:#92400e}
+.modal p{margin:0 0 16px;color:var(--ink);font-size:15px}
+.modal button{width:100%;background:var(--navy);border-color:var(--navy);color:#fff}
 @media(max-width:730px){.layout{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.card{padding:16px}h1{font-size:23px}header{align-items:flex-start}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}
 </style></head><body><main>
@@ -42,12 +48,16 @@ details{border-top:1px solid var(--line);margin-top:14px;padding-top:13px}summar
 <section class="card"><details><summary>Session activity log</summary><div class="stats" id="stats"></div>
 <p class="sub">Counts and times describe session activity. They cannot measure attention or assess ADHD. Avoid using them to punish or rank students.</p><p><a href="/api/teacher/log.csv">Download session CSV</a> <button id="clearLog">Clear session log</button></p></details></section>
 <p id="toast" role="status"></p><footer>Step Buddy collects no names or medical records and generates no distraction scores. Check the device status after sending a command. Keep the ESP8266 HTTP hotspot off the public internet.</footer>
+<div class="modal-backdrop" id="awayModal" role="alertdialog" aria-modal="true" aria-labelledby="awayModalTitle">
+<div class="modal"><h3 id="awayModalTitle">⚠️ Student Left Seat</h3><p id="awayModalText">The student is away from their seat and needs attention. The task timer has been paused automatically.</p><button type="button" id="closeAwayModal">OK, got it</button></div>
+</div>
 </main><script>
 const $=id=>document.getElementById(id);const HINTS=['Start with one small step','Read the question again','Take your time','Look at an example','You’re making progress','I’ll come and help'];
 HINTS.forEach((s,i)=>{const b=document.createElement('button');b.textContent=s;b.dataset.cmd='HINT'+i;$('hints').appendChild(b)});
 const stats=[['stepsDone','Steps completed'],['helpCount','Private help requests'],['restCount','Rest breaks'],['moveCount','Movement breaks'],['hints','Icon hints'],['workSec','Time on task']];
 stats.forEach(([k,label])=>{const card=document.createElement('div');card.className='stat';const cap=document.createElement('span');cap.className='small';cap.textContent=label;const val=document.createElement('b');val.id='stat_'+k;val.textContent='—';card.append(cap,val);$('stats').appendChild(card)});
-let latest=null,busy=false;
+let latest=null,busy=false,wasAway=false;
+$('closeAwayModal').onclick=()=>$('awayModal').classList.remove('show');
 function note(s){$('toast').textContent=s}function clock(n){n=+n||0;return Math.floor(n/60)+':'+String(n%60|0).padStart(2,'0')}
 function form(body){return {method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(body)}}
 async function submit(url,body){
@@ -71,7 +81,11 @@ document.addEventListener('click',e=>{const b=e.target.closest('button[data-cmd]
 $('setTemplate').onclick=()=>{if(confirm('Switch templates and reset progress?'))sendCmd('TPL'+$('template').value)};
 $('clearLog').onclick=()=>{if(confirm('Clear the session event log?'))submit('/api/teacher/clear-log',{})};
 function render(d){latest=d;$('online').textContent=d.online?'● micro:bit online':'● micro:bit offline';$('online').classList.toggle('bad',!d.online);
- if(!d.online){$('title').textContent='Waiting for the micro:bit';$('instruction').textContent='Check the power and the P14 and P15 serial connections.';document.querySelectorAll('button[data-cmd],button[data-setting],#setTemplate').forEach(b=>b.disabled=true);return}
+ if(!d.online){wasAway=false;$('awayModal').classList.remove('show');$('title').textContent='Waiting for the micro:bit';$('instruction').textContent='Check the power and the P14 and P15 serial connections.';document.querySelectorAll('button[data-cmd],button[data-setting],#setTemplate').forEach(b=>b.disabled=true);return}
+ const isAway=d.state==='AWAY';
+ if(isAway&&!wasAway){$('awayModal').classList.add('show');note('Alert: Student left their seat.');}
+ else if(!isAway&&wasAway){$('awayModal').classList.remove('show');}
+ wasAway=isAway;
  document.querySelectorAll('button[data-cmd],button[data-setting],#setTemplate').forEach(b=>b.disabled=false);
  $('stepCounter').textContent='Step '+d.step+' / '+d.total+' · '+d.tpl;
  $('title').textContent=d.state==='DONE'?'All steps complete':d.current;
@@ -82,12 +96,13 @@ function render(d){latest=d;$('online').textContent=d.online?'● micro:bit onli
  const needsHelp=d.help==='1',ack=d.ack==='1';let heading='No help requests',text='Offer specific encouragement or a hint if needed.';
  if(needsHelp){heading=ack?'✓ Student notified that help is on the way':'🙋 Student needs help';text='The student pressed B on the micro:bit. '+(ack?'Help the student, then select “Mark as resolved”.':'Select “Acknowledge request” to let the student know you saw it.')}
  else if(d.state==='WAIT'){heading='✓ Student marked the step complete';text='Check the work, then select “Complete step and continue”.'}
+ else if(d.state==='AWAY'){heading='🪑 Student is away from seat';text='The student left their seat and needs attention. The task timer is paused until they return.'}
  else if(d.state==='REST'||d.state==='RESTOVER'){heading='☁️ Student is taking a break';text='Agree with the student on when to return.'}
  else if(d.state==='OFFER'){heading='🚶 Movement break offered';text='The student can start now or choose later.'}
  else if(d.state==='TIME'){heading='Suggested time reached';text='Offer more time or simplify the instructions. Time alone cannot indicate attention.'}
  else if(d.state==='PAUSE'){heading='Session paused';text='Resume to continue from this step.'}
  else if(d.state==='DONE'){heading='🎉 All steps complete';text='Praise something specific and review the session together.'}
- $('supportTitle').textContent=heading;$('supportText').textContent=text;$('support').classList.toggle('need',needsHelp||d.state==='WAIT');
+ $('supportTitle').textContent=heading;$('supportText').textContent=text;$('support').classList.toggle('need',needsHelp||d.state==='WAIT'||d.state==='AWAY');
  $('ack').disabled=!needsHelp||ack;$('resolved').disabled=!needsHelp;
  $('nextBtn').disabled=['DONE','REST','RESTOVER','MOVE','PAUSE','AWAY'].includes(d.state);
  $('backBtn').disabled=(Number(d.step)<=1 && d.state!=='DONE') || ['REST','RESTOVER','MOVE'].includes(d.state);
@@ -101,7 +116,7 @@ function render(d){latest=d;$('online').textContent=d.online?'● micro:bit onli
  for(const [id,k] of [['budget','expectedSec'],['interval','moveIntervalSec'],['restDuration','restDurationSec']]){if(document.activeElement!==$(id))$(id).value=d[k]}
  stats.forEach(([k])=>{$('stat_'+k).textContent=k==='workSec'?clock(d[k]):d[k]})}
 async function refresh(){try{const r=await fetch('/api/teacher/status',{cache:'no-store',credentials:'same-origin'});if(!r.ok)throw Error('HTTP '+r.status);render(await r.json())}
- catch(e){$('online').textContent='● Dashboard disconnected';$('online').classList.add('bad');note('Could not refresh. '+e.message);latest=null;document.querySelectorAll('button[data-cmd],button[data-setting],#setTemplate').forEach(b=>b.disabled=true)}}
+ catch(e){wasAway=false;$('awayModal').classList.remove('show');$('online').textContent='● Dashboard disconnected';$('online').classList.add('bad');note('Could not refresh. '+e.message);latest=null;document.querySelectorAll('button[data-cmd],button[data-setting],#setTemplate').forEach(b=>b.disabled=true)}}
 refresh();setInterval(refresh,1200);
 </script></body></html>
 )STBHTML";
