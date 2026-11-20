@@ -79,12 +79,13 @@ function render(d){latest=d;$('online').textContent=d.online?'● micro:bit onli
  const needsHelp=d.help==='1',ack=d.ack==='1';let heading='No help requests',text='Offer specific encouragement or a hint if needed.';
  if(needsHelp){heading=ack?'✓ Student notified that help is on the way':'🙋 Student needs help';text='The student pressed B on the micro:bit. '+(ack?'Help the student, then select “Mark as resolved”.':'Select “Acknowledge request” to let the student know you saw it.')}
  else if(d.state==='WAIT'){heading='✓ Student marked the step complete';text='Check the work, then select “Complete step and continue”.'}
+ else if(d.state==='AWAY'){heading='🪑 Student is away from seat';text='The task timer is paused while the seat is empty. It resumes automatically when the student returns.'}
  else if(d.state==='REST'||d.state==='RESTOVER'){heading='☁️ Student is taking a break';text='Agree with the student on when to return.'}
  else if(d.state==='OFFER'){heading='🚶 Movement break offered';text='The student can start now or choose later.'}
  else if(d.state==='TIME'){heading='Suggested time reached';text='Offer more time or simplify the instructions. Time alone cannot indicate attention.'}
  else if(d.state==='PAUSE'){heading='Session paused';text='Resume to continue from this step.'}
  else if(d.state==='DONE'){heading='🎉 All steps complete';text='Praise something specific and review the session together.'}
- $('supportTitle').textContent=heading;$('supportText').textContent=text;$('support').classList.toggle('need',needsHelp||d.state==='WAIT');
+ $('supportTitle').textContent=heading;$('supportText').textContent=text;$('support').classList.toggle('need',needsHelp||d.state==='WAIT'||d.state==='AWAY');
  $('ack').disabled=!needsHelp||ack;$('resolved').disabled=!needsHelp;
  $('nextBtn').disabled=['DONE','REST','RESTOVER','MOVE','PAUSE','AWAY'].includes(d.state);
  $('backBtn').disabled=(Number(d.step)<=1 && d.state!=='DONE') || ['REST','RESTOVER','MOVE'].includes(d.state);
