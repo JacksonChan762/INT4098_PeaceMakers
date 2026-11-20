@@ -9,7 +9,7 @@
 //
 // Hardware wiring (updated):
 // ESP8266 D5 (RX) <- WuKong 14S (TX) | ESP8266 D6 (TX) -> WuKong 15S (RX) | GND common
-// External Buzzer -> WuKong 13S / 13V / 13G (P13)
+// WuKong onboard buzzer -> P0 (physical switch ON for sound)
 // Sonar:bit       -> WuKong 8S / 8V / 8G (P8, seat presence / AWAY state)
 // Pointer Servo   -> WuKong S0S / S0V / S0G (S0, I2C 0x10)
 // =============================================================================
@@ -21,7 +21,7 @@ const HINT_MS = 5000
 const BRIGHT_NORMAL = 155
 const BRIGHT_LOW = 35
 const SOUND_ON = true
-// All sound uses the external buzzer connected to WuKong 13S (P13).
+// All sound uses the WuKong onboard P0 buzzer.
 
 const LOW_SENSORY_DEFAULT = true
 const TIMER_DEFAULT = false // optional, some learners find a countdown stressful
@@ -29,6 +29,9 @@ const TIMER_DEFAULT = false // optional, some learners find a countdown stressfu
 // Sonar:bit seat-presence settings (WuKong 8S / P8).
 const SONAR_ENABLED = true
 const SONAR_SAMPLE_MS = 500
+const SONAR_MIN_CM = 4
+const SONAR_MAX_CM = 400
+const AWAY_CUE_COOLDOWN_MS = 60000
 const AWAY_DIST_CM = 40
 const AWAY_CONFIRM_MS = 3000
 const RETURN_CONFIRM_MS = 1500
@@ -66,10 +69,11 @@ let stepBudgetSec = 180
 let finished = false
 let paused = false
 let away = false
-let sonarSeenValid = false
+let sonarSeenNear = false
 let awaySince = 0
 let backSince = 0
 let lastSonarAt = 0
+let lastAwayCueAt = -AWAY_CUE_COOLDOWN_MS
 let waitingTeacher = false
 let helpActive = false
 let helpAcknowledged = false
@@ -124,46 +128,68 @@ function movePointer() {
     setServo(POINTER_START + s * POINTER_STEP)
 }
 function readSonarCm(): number {
+    pins.setPull(DigitalPin.P8, PinPullMode.PullNone)
     pins.digitalWritePin(DigitalPin.P8, 0)
     control.waitMicros(2)
     pins.digitalWritePin(DigitalPin.P8, 1)
     control.waitMicros(10)
     pins.digitalWritePin(DigitalPin.P8, 0)
     let duration = pins.pulseIn(DigitalPin.P8, PulseValue.High, 25000)
-    if (duration <= 0) return -1
-    return Math.idiv(duration * 34, 2000)
+    let cm = Math.idiv(duration * 34, 2000)
+    return cm >= SONAR_MIN_CM && cm <= SONAR_MAX_CM ? cm : -1
 }
+
+function clearAway(reason: string) {
+    awaySince = 0
+    backSince = 0
+    if (away) {
+        away = false
+        sendEvent("away_end", reason)
+    }
+}
+
 function updateSeatPresence(now: number) {
-    if (!SONAR_ENABLED) return
-    if (paused || finished || resting || moving) {
-        awaySince = 0
-        backSince = 0
+    if (paused || finished || resting || moving || moveOffer || waitingTeacher || helpActive) {
+        sonarSeenNear = false
+        clearAway("activity")
         return
     }
-    let dist = readSonarCm()
-    if (dist > 0 && dist <= AWAY_DIST_CM) {
-        sonarSeenValid = true
+    if (now - lastSonarAt > SONAR_SAMPLE_MS * 3) {
+        sonarSeenNear = false
+        clearAway("sample_gap")
+    }
+
+    let cm = readSonarCm()
+    if (cm < 0) {
+        // Missing echoes and out-of-range distances cannot establish seat absence.
+        sonarSeenNear = false
+        clearAway("no_valid_echo")
+        return
+    }
+    if (cm <= AWAY_DIST_CM) {
+        sonarSeenNear = true
         awaySince = 0
         if (away) {
             if (backSince == 0) backSince = now
-            else if (now - backSince >= RETURN_CONFIRM_MS) {
-                away = false
-                backSince = 0
-                sendEvent("away_end", "" + dist)
-            }
+            else if (now - backSince >= RETURN_CONFIRM_MS) clearAway("near")
         }
-    } else if (sonarSeenValid) {
-        backSince = 0
-        if (!away) {
-            if (awaySince == 0) awaySince = now
-            else if (now - awaySince >= AWAY_CONFIRM_MS) {
-                away = true
-                awaySince = 0
-                sendEvent("away_start", dist > 0 ? "" + dist : "out_of_range")
-            }
-        }
+        return
+    }
+
+    backSince = 0
+    if (!sonarSeenNear || away) return
+    if (awaySince == 0) awaySince = now
+    if (now - awaySince < AWAY_CONFIRM_MS) return
+
+    away = true
+    awaySince = 0
+    sendEvent("away_start", "possible")
+    if (SOUND_ON && !lowSensory && now - lastAwayCueAt >= AWAY_CUE_COOLDOWN_MS) {
+        lastAwayCueAt = now
+        music.playTone(Note.E5, 120)
     }
 }
+
 function defaultStepBudget() {
     stepBudgetSec = tplMins[tpl][Math.min(step, nSteps() - 1)] * 60
 }
@@ -174,6 +200,7 @@ function newSession() {
     away = false
     awaySince = 0
     backSince = 0
+    sonarSeenNear = false
     waitingTeacher = false
     helpActive = false
     helpAcknowledged = false
@@ -208,9 +235,7 @@ function newSession() {
 function completeStep(byTeacher: boolean) {
     if (paused || finished || resting || moving) return
     let now = input.runningTime()
-    away = false
-    awaySince = 0
-    backSince = 0
+    clearAway("activity")
     waitingTeacher = false
     helpActive = false
     helpAcknowledged = false
@@ -285,9 +310,7 @@ function resolveHelp() {
 function startRest(who: string) {
     if (paused || finished || resting) return
     if (moving) endMove("rest")
-    away = false
-    awaySince = 0
-    backSince = 0
+    clearAway("activity")
     moveOffer = false
     moveOfferUntil = 0
     resting = true
@@ -312,9 +335,7 @@ function offerMove(why: string) {
 }
 function startMove(who: string) {
     if (paused || finished || resting || moving) return
-    away = false
-    awaySince = 0
-    backSince = 0
+    clearAway("activity")
     moving = true
     moveOffer = false
     moveOfferUntil = 0
@@ -537,8 +558,8 @@ function sendStatus() {
 
 serial.redirect(SerialPin.P14, SerialPin.P15, BaudRate.BaudRate9600)
 serial.setRxBufferSize(96)
-pins.digitalWritePin(DigitalPin.P13, 0)
-pins.analogSetPitchPin(AnalogPin.P13)
+pins.digitalWritePin(DigitalPin.P0, 0)
+pins.analogSetPitchPin(AnalogPin.P0)
 music.setBuiltInSpeakerEnabled(false)
 serial.onDataReceived(serial.delimiters(Delimiters.NewLine), function () {
     let line = serial.readUntil(serial.delimiters(Delimiters.NewLine))
@@ -559,11 +580,6 @@ basic.forever(function () {
     let now = input.runningTime()
     let dt = Math.max(0, Math.min(2000, now - last))
     last = now
-
-    if (now - lastSonarAt >= SONAR_SAMPLE_MS) {
-        updateSeatPresence(now)
-        lastSonarAt = now
-    }
 
     // Work clock is NOT a measured focus score. It excludes rest, movement,
     // away periods, and paused or finished sessions.
@@ -592,15 +608,8 @@ basic.forever(function () {
         }
     }
 
-    // Any physical button press confirms the student is back at the device.
-    if (pressAB || pressA || pressB) {
-        if (away) {
-            away = false
-            awaySince = 0
-            backSince = 0
-            sendEvent("away_end", "button")
-        }
-    }
+    // Keep the student in control during a distance cue.
+    if (pressAB || pressA || pressB) clearAway("button")
 
     // A+B has precedence over both separate button events.
     if (pressAB) {
@@ -623,6 +632,11 @@ basic.forever(function () {
     }
     while (cmds.length > 0) handleCommand(cmds.shift())
     if (moveOffer && now >= moveOfferUntil) moveLater("timeout")
+
+    if (SONAR_ENABLED && now - lastSonarAt >= SONAR_SAMPLE_MS) {
+        updateSeatPresence(now)
+        lastSonarAt = now
+    }
 
     let view = currentView(now)
     if (view != lastView || lowSensory != lastLow) {
